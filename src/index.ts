@@ -290,6 +290,16 @@ function explicitSessionIdOf(args: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+/** v7：按 sessionId 从 DSH sessions store 取当前会话对象（补档/热加载恢复用） */
+function sessionOf(ctx: HostContextLike, sessionId: string): SessionLike | null {
+  try {
+    const store = (ctx.sessions as { store?: Map<string, SessionLike> } | undefined)?.store;
+    return store?.get(sessionId) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** 轮询某个 bundle 的原始层向量 pending 归零（自检/收尾用；最多等 timeoutMs） */
 async function drainRawVectors(bundle: VaultBundle, timeoutMs = 8_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
@@ -335,6 +345,8 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
     let currentSessionId: string | null = null;
     let vaultManager!: RuntimeVaultManager;
     let promptRegistration: PromptRegistration | null = null;
+    /** v7：capture hooks 在 session-config 服务之后初始化；用 ref 打破声明顺序 */
+    let captureHooksRef: CaptureHooksHandle | null = null;
     const refreshPrompt = async (): Promise<void> => {
       try {
         await promptRegistration?.refresh();
@@ -347,6 +359,15 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
       filePath: sessionConfigFilePath(config.dataDir),
       logger,
       now: () => Date.now(),
+      // v7：从关闭切回开启时，补档当前会话已有的历史事件（用户消息、回复等），
+      // 否则会出现"只记录开启后的内容、漏掉之前发送的用户消息"。
+      onEnabled: (sessionId) => {
+        const session = sessionOf(ctx, sessionId);
+        if (!session || !captureHooksRef) return;
+        void captureHooksRef.backfillSession(session as never).catch((error) => {
+          logger.warn(`session-config: backfill after enable failed for ${sessionId}`, error);
+        });
+      },
     });
 
     const personaRegistry = createPersonaRegistry({
@@ -702,6 +723,23 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
           const routing = vaultManager.resolveRouting(sessionId);
           return { id: routing.vaultId, name: vaultManager.vaultName(routing.vaultId) };
         },
+        // v6：人格会话也可只读访问共享记忆库
+        sharedVault: async () => {
+          const shared = await vaultManager.openVault('shared');
+          return {
+            store: shared.store,
+            vault: shared.vault,
+            recaller: shared.recaller,
+            scope: {
+              id: 'shared',
+              name: vaultManager.vaultName('shared'),
+              personaId: null,
+              sessionId: resolved.sessionId,
+              memoryEnabled: true,
+              dir: shared.dir,
+            },
+          };
+        },
       };
     };
     const toolContextFor = async (args?: unknown): Promise<ToolContext> => {
@@ -756,6 +794,19 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
       },
     });
     ctx.effect(() => () => hooks.dispose(), `${name}: session capture hooks`);
+    captureHooksRef = hooks;
+    // v7：插件热加载/升级发生在会话进行中时，session/created 不会重放；
+    // 对当前 store 中仍启用的会话做一次幂等补档，避免漏掉此前的用户消息。
+    try {
+      const store = (ctx.sessions as unknown as { store?: Map<string, unknown> } | undefined)?.store;
+      for (const session of store?.values() ?? []) {
+        void hooks.backfillSession(session as never).catch((error) => {
+          logger.warn('startup session backfill failed', error);
+        });
+      }
+    } catch (error) {
+      logger.warn('startup session backfill skipped', error);
+    }
     const disposeRetentionHook = ctx.on('session/disposed', () => {
       vaultManager.markDirtyTick();
       markForgettingDirty();
@@ -769,8 +820,11 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
       memoryEnabled: view.memoryEnabled,
       personaEnabled: view.personaEnabled,
       personaId: view.personaId,
+      fullCapture: view.fullCapture,
       updatedAt: view.updatedAt,
       isDefault: view.isDefault,
+      // v1.1.8：全局偏好（面板默认开关；每次开启仍可弹窗覆盖）
+      backfillOnEnable: sessionConfigService.getDefaults().backfillOnEnable,
     });
     const resolveVaultName = (vaultId: string): string => vaultManager.vaultName(vaultId);
     const httpResolver: HttpScopeResolver = {
@@ -826,8 +880,10 @@ export async function apply(ctx: HostContextLike, rawConfig: Record<string, unkn
         return { vaultId: routing.vaultId, vaultName: resolveVaultName(routing.vaultId) };
       },
       sessionConfig: (sessionId) => toHttpSessionView(sessionConfigService.get(sessionId ?? '')),
-      setSessionConfig: (sessionId, patch) => {
-        const view = sessionConfigService.set(sessionId, patch);
+      setSessionConfig: (sessionId, patch, options) => {
+        // v1.1.8：未显式传 backfillHistory 时跟随全局偏好；UI 弹窗会显式传选择。
+        const backfillHistory = options?.backfillHistory ?? sessionConfigService.getDefaults().backfillOnEnable;
+        const view = sessionConfigService.set(sessionId, patch, { backfillHistory });
         void refreshPrompt();
         return toHttpSessionView(view);
       },

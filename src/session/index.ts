@@ -20,11 +20,18 @@ export interface SessionConfig {
   personaEnabled: boolean;
   /** 指定人格 id（null = 使用全局激活人格；仅 personaEnabled=true 时生效） */
   personaId: string | null;
+  /**
+   * v1.2.0：是否记录完整原始事件（思考/工具调用/系统事件等）。
+   * false（默认）= 只记录最终用户输入与最终助手回复；true = 全量归档。
+   */
+  fullCapture: boolean;
   /** 最近更新时间（epoch ms；默认值记录为 0） */
   updatedAt: number;
 }
 
-export type SessionConfigPatch = Partial<Pick<SessionConfig, 'memoryEnabled' | 'personaEnabled' | 'personaId'>>;
+export type SessionConfigPatch = Partial<
+  Pick<SessionConfig, 'memoryEnabled' | 'personaEnabled' | 'personaId' | 'fullCapture'>
+>;
 
 export interface SessionConfigView extends SessionConfig {
   /** true = 该会话没有显式配置，返回默认值 */
@@ -35,12 +42,24 @@ export interface SessionConfigDefaults {
   memoryEnabled: boolean;
   personaEnabled: boolean;
   personaId: string | null;
+  /**
+   * v1.2.0：新会话默认是否记录完整原始事件（思考/工具调用/事件等）。
+   * 默认 false = 只记录最终用户输入与最终助手回复。
+   */
+  fullCapture: boolean;
+  /**
+   * v1.1.8：开启记忆时是否默认补档本会话已有历史。
+   * 仅作为默认选择；每次开启仍由 UI 弹窗确认（可覆盖）。
+   */
+  backfillOnEnable: boolean;
 }
 
 export const DEFAULT_SESSION_CONFIG: SessionConfigDefaults = Object.freeze({
   memoryEnabled: true,
   personaEnabled: false,
   personaId: null,
+  fullCapture: false,
+  backfillOnEnable: false,
 });
 
 export interface CreateSessionConfigServiceOptions {
@@ -49,13 +68,23 @@ export interface CreateSessionConfigServiceOptions {
   logger?: Logger;
   now?: () => number;
   defaults?: Partial<SessionConfigDefaults>;
+  /**
+   * v7：会话从 memory=false 切换为 true 时回调（捕获层用它补档当前会话已发生的
+   * user/assistant/tool 事件，避免"只记录开启后的回复、漏掉开启前的用户消息"）。
+   * 回调异步执行且错误只记录 warn，不影响开关写入。
+   */
+  onEnabled?: (sessionId: string) => void | Promise<void>;
 }
 
 export interface SessionConfigService {
   /** 读取一个会话的配置（无显式配置时返回默认值 + isDefault:true） */
   get(sessionId: string): SessionConfigView;
   /** 更新一个会话的配置；返回最新值 */
-  set(sessionId: string, patch: SessionConfigPatch): SessionConfigView;
+  set(
+    sessionId: string,
+    patch: SessionConfigPatch,
+    options?: { backfillHistory?: boolean },
+  ): SessionConfigView;
   /** 显式删除会话配置（恢复默认） */
   remove(sessionId: string): boolean;
   /** 列出所有显式配置的会话 */
@@ -92,6 +121,8 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
     memoryEnabled: toBool(options.defaults?.memoryEnabled, DEFAULT_SESSION_CONFIG.memoryEnabled),
     personaEnabled: toBool(options.defaults?.personaEnabled, DEFAULT_SESSION_CONFIG.personaEnabled),
     personaId: toPersonaId(options.defaults?.personaId),
+    fullCapture: toBool(options.defaults?.fullCapture, DEFAULT_SESSION_CONFIG.fullCapture),
+    backfillOnEnable: toBool(options.defaults?.backfillOnEnable, DEFAULT_SESSION_CONFIG.backfillOnEnable),
   };
   const sessions = new Map<string, SessionConfig>();
   let loaded = false;
@@ -115,6 +146,8 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
         defaults.memoryEnabled = toBool(parsed.defaults.memoryEnabled, defaults.memoryEnabled);
         defaults.personaEnabled = toBool(parsed.defaults.personaEnabled, defaults.personaEnabled);
         defaults.personaId = toPersonaId(parsed.defaults.personaId);
+        defaults.fullCapture = toBool(parsed.defaults.fullCapture, defaults.fullCapture);
+        defaults.backfillOnEnable = toBool(parsed.defaults.backfillOnEnable, defaults.backfillOnEnable);
       }
       const rawSessions = isRecord(parsed) && isRecord(parsed.sessions) ? parsed.sessions : isRecord(parsed) ? parsed : {};
       for (const [sessionId, raw] of Object.entries(rawSessions)) {
@@ -124,6 +157,7 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
           memoryEnabled: toBool(raw.memoryEnabled, defaults.memoryEnabled),
           personaEnabled: toBool(raw.personaEnabled, defaults.personaEnabled),
           personaId: toPersonaId(raw.personaId),
+          fullCapture: toBool(raw.fullCapture, defaults.fullCapture),
           updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
         });
       }
@@ -168,7 +202,7 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
 
   return {
     get: view,
-    set(sessionId, patch) {
+    set(sessionId, patch, setOptions) {
       readFile();
       if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
         throw new TypeError('[dsh-life-memory] session-config: sessionId must be a non-empty string');
@@ -179,12 +213,24 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
         memoryEnabled: patch?.memoryEnabled === undefined ? previous.memoryEnabled : patch.memoryEnabled === true,
         personaEnabled: patch?.personaEnabled === undefined ? previous.personaEnabled : patch.personaEnabled === true,
         personaId: patch?.personaId === undefined ? previous.personaId : toPersonaId(patch.personaId),
+        fullCapture: patch?.fullCapture === undefined ? previous.fullCapture : patch.fullCapture === true,
         updatedAt: now(),
       };
       // 人格开启 ⇒ 记忆强制开启（即使本次 patch 显式传了 memoryEnabled=false）
       if (next.personaEnabled) next.memoryEnabled = true;
       sessions.set(sessionId, next);
       writeFile();
+      // v1.1.8：只有明确选择补档（backfillHistory=true）时才通知捕获层补档；
+      // 默认 false，避免每次开启记忆都悄悄灌入整段历史。
+      if (!previous.memoryEnabled && next.memoryEnabled && setOptions?.backfillHistory === true) {
+        try {
+          void Promise.resolve(options.onEnabled?.(sessionId)).catch((error) => {
+            warn('session-config: onEnabled failed', error);
+          });
+        } catch (error) {
+          warn('session-config: onEnabled threw', error);
+        }
+      }
       return { ...next, isDefault: false };
     },
     remove(sessionId) {
@@ -214,6 +260,8 @@ export function createSessionConfigService(options: CreateSessionConfigServiceOp
       if (patch?.memoryEnabled !== undefined) defaults.memoryEnabled = patch.memoryEnabled === true;
       if (patch?.personaEnabled !== undefined) defaults.personaEnabled = patch.personaEnabled === true;
       if (patch?.personaId !== undefined) defaults.personaId = toPersonaId(patch.personaId);
+      if (patch?.fullCapture !== undefined) defaults.fullCapture = patch.fullCapture === true;
+      if (patch?.backfillOnEnable !== undefined) defaults.backfillOnEnable = patch.backfillOnEnable === true;
       // 人格开启 ⇒ 记忆强制开启
       if (defaults.personaEnabled) defaults.memoryEnabled = true;
       writeFile();

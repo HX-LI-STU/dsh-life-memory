@@ -127,8 +127,24 @@ export interface ToolSessionConfigHost {
   get(sessionId: string): SessionConfigView;
   set(
     sessionId: string,
-    patch: { memoryEnabled?: boolean; personaEnabled?: boolean; personaId?: string | null },
+    patch: {
+      memoryEnabled?: boolean;
+      personaEnabled?: boolean;
+      personaId?: string | null;
+      fullCapture?: boolean;
+    },
+    options?: { backfillHistory?: boolean },
   ): SessionConfigView;
+  /** v1.1.8：全局默认（开启记忆时默认是否补档） */
+  getDefaults?(): { backfillOnEnable?: boolean; fullCapture?: boolean };
+}
+
+/** 共享记忆库的只读视图（人格会话仍可读取共享库；其它人格库不可访问） */
+export interface ToolSharedVaultView {
+  store: MemoryStore;
+  vault: RawVault;
+  recaller: Recaller;
+  scope: ToolVaultScope;
 }
 
 /** 工具运行上下文（由宿主集成层构造） */
@@ -171,6 +187,8 @@ export interface ToolContext {
   listVaults?: () => Promise<Array<Record<string, unknown>>>;
   /** v5：按会话解析库 id/名称（memory_session_config 返回当前库用） */
   resolveVault?: (sessionId: string) => { id: string; name: string };
+  /** v6：只读访问共享库（人格开启的会话也可读取共享记忆；其它人格库不可访问） */
+  sharedVault?: () => Promise<ToolSharedVaultView>;
 }
 
 export interface ToolError {
@@ -185,6 +203,29 @@ const TEXT_LIMIT = 600;
 const EXCERPT_LIMIT = 200;
 const PAYLOAD_JSON_LIMIT = 64 * 1024;
 const RAW_TEXT_LIMIT = 8 * 1024;
+
+/** 解析工具的可选 vault 参数：只允许 "shared"（用于人格会话读取共享记忆） */
+async function requestedVault(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<{ view?: ToolSharedVaultView; error?: ToolResult }> {
+  const requested = typeof args.vault === 'string' ? args.vault.trim() : '';
+  if (requested.length === 0 || requested === ctx.vaultScope?.id) return {};
+  if (requested !== 'shared') {
+    return {
+      error: fail(
+        'E_BAD_ARGS',
+        'vault 只允许 "shared"（跨人格记忆库不可访问；共享库对所有人格会话可读）',
+        false,
+        { field: 'vault', allowed: ['shared'] },
+      ),
+    };
+  }
+  if (!ctx.sharedVault) {
+    return { error: fail('E_UNAVAILABLE', '共享库访问未启用（宿主未提供 sharedVault）', true) };
+  }
+  return { view: await ctx.sharedVault() };
+}
 
 function fail(code: string, message: string, retryable = false, detail?: unknown): ToolError {
   return { ok: false, error: { code, message, retryable, ...(detail !== undefined ? { detail } : {}) } };
@@ -377,6 +418,18 @@ export async function memoryRecall(input: unknown, ctx: ToolContext): Promise<To
   if (query.length === 0) return fail('E_BAD_ARGS', 'query 不能为空', false, { field: 'query' });
   if (query.length > 2000) return fail('E_BAD_ARGS', 'query 长度超过 2000', false, { field: 'query' });
 
+  const vaultSelection = await requestedVault(args, ctx);
+  if (vaultSelection.error) return vaultSelection.error;
+  const usingSharedVault = vaultSelection.view !== undefined;
+  const effectiveCtx: ToolContext = vaultSelection.view
+    ? {
+        ...ctx,
+        store: vaultSelection.view.store,
+        vault: vaultSelection.view.vault,
+        recaller: vaultSelection.view.recaller,
+      }
+    : ctx;
+
   const limit = intInRange(args.limit, 1, 50, ctx.config.recall.toolDefaultLimit);
   const budgetTokens = intInRange(args.budgetTokens, 200, 8000, 1200);
   const includeRaw = args.includeRaw !== false;
@@ -389,7 +442,7 @@ export async function memoryRecall(input: unknown, ctx: ToolContext): Promise<To
   // 保留期层参数（implicit 模式有效）：retentionTiers 只检索指定保留期层
   const retentionTiers = asStringArray(args.retentionTiers) as RetentionTier[] | undefined;
   // 人格作用域（v4）：默认当前激活人格 + 共享；persona=null → 仅共享；allPersonas → 跨人格
-  const allPersonas = args.allPersonas === true;
+  const allPersonas = usingSharedVault ? true : args.allPersonas === true;
   let personaId: string | null | undefined;
   let includeSharedPersona = args.includeSharedPersona !== false;
   if (!allPersonas) {
@@ -437,7 +490,7 @@ export async function memoryRecall(input: unknown, ctx: ToolContext): Promise<To
     trackAccess: true,
   };
 
-  const hits = await ctx.recaller.recall(recallQuery);
+  const hits = await effectiveCtx.recaller.recall(recallQuery);
   const filtered =
     mode === 'explicit' || includeArchived
       ? hits
@@ -473,6 +526,9 @@ export async function memoryRecall(input: unknown, ctx: ToolContext): Promise<To
     ok: true,
     query,
     mode,
+    ...(usingSharedVault && vaultSelection.view
+      ? { vault: { id: vaultSelection.view.scope.id, name: vaultSelection.view.scope.name } }
+      : {}),
     persona: allPersonas ? 'all' : personaId,
     items,
     totalCandidates: filtered.length,
@@ -849,10 +905,21 @@ export async function memoryGetRaw(input: unknown, ctx: ToolContext): Promise<To
   if (!/^\d{4}-\d{2}-\d{2}-\d{6,}$/.test(id)) {
     return fail('E_BAD_ARGS', 'id 必须是 YYYY-MM-DD-NNNNNN 格式', false, { field: 'id' });
   }
-  const record = await ctx.vault.get(id);
+  const vaultSelection = await requestedVault(args, ctx);
+  if (vaultSelection.error) return vaultSelection.error;
+  const effectiveCtx: ToolContext = vaultSelection.view
+    ? {
+        ...ctx,
+        store: vaultSelection.view.store,
+        vault: vaultSelection.view.vault,
+        recaller: vaultSelection.view.recaller,
+      }
+    : ctx;
+
+  const record = await effectiveCtx.vault.get(id);
   if (!record) return fail('E_RAW_NOT_FOUND', `原始记录不存在：${id}`, false, { id });
 
-  const index = ctx.store.getRawIndex(id);
+  const index = effectiveCtx.store.getRawIndex(id);
   let hashOk: boolean | null = null;
   if (ctx.hashRawRecord) {
     try {
@@ -878,6 +945,7 @@ export async function memoryGetRaw(input: unknown, ctx: ToolContext): Promise<To
 
   return {
     ok: true,
+    ...(vaultSelection.view ? { vault: { id: vaultSelection.view.scope.id, name: vaultSelection.view.scope.name } } : {}),
     record: {
       ...record,
       text: text.text,
@@ -1143,11 +1211,18 @@ export async function memorySessionConfig(input: unknown, ctx: ToolContext): Pro
   if (sessionId.length === 0) {
     return fail('E_BAD_ARGS', '缺少 sessionId（无当前会话上下文时必须显式传入）', false, { field: 'sessionId' });
   }
-  const patch: { memoryEnabled?: boolean; personaEnabled?: boolean; personaId?: string | null } = {};
+  const patch: {
+    memoryEnabled?: boolean;
+    personaEnabled?: boolean;
+    personaId?: string | null;
+    fullCapture?: boolean;
+  } = {};
   if (args.memory !== undefined) patch.memoryEnabled = args.memory === true;
   else if (args.memoryEnabled !== undefined) patch.memoryEnabled = args.memoryEnabled === true;
   if (args.persona !== undefined) patch.personaEnabled = args.persona === true;
   else if (args.personaEnabled !== undefined) patch.personaEnabled = args.personaEnabled === true;
+  if (args.fullCapture !== undefined) patch.fullCapture = args.fullCapture === true;
+  else if (args.full !== undefined) patch.fullCapture = args.full === true;
   if (args.personaId !== undefined) {
     patch.personaId =
       args.personaId === null
@@ -1157,9 +1232,16 @@ export async function memorySessionConfig(input: unknown, ctx: ToolContext): Pro
           : null;
   }
   let view: SessionConfigView;
+  // v1.1.8：显式 backfill 优先；否则跟随全局偏好（默认 false）。
+  const backfillHistory =
+    typeof args.backfill === 'boolean'
+      ? args.backfill
+      : ctx.sessionConfig.getDefaults?.().backfillOnEnable === true;
   try {
     view =
-      Object.keys(patch).length > 0 ? ctx.sessionConfig.set(sessionId, patch) : ctx.sessionConfig.get(sessionId);
+      Object.keys(patch).length > 0
+        ? ctx.sessionConfig.set(sessionId, patch, { backfillHistory })
+        : ctx.sessionConfig.get(sessionId);
   } catch (err) {
     return fail('E_INTERNAL', `会话配置写入失败：${err instanceof Error ? err.message : String(err)}`, true);
   }
@@ -1170,6 +1252,8 @@ export async function memorySessionConfig(input: unknown, ctx: ToolContext): Pro
     memory: view.memoryEnabled,
     persona: view.personaEnabled,
     personaId: view.personaId,
+    fullCapture: view.fullCapture,
+    backfill: backfillHistory,
     memoryEnabled: view.memoryEnabled,
     personaEnabled: view.personaEnabled,
     isDefault: view.isDefault,

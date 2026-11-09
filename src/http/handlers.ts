@@ -58,8 +58,12 @@ export interface HttpSessionConfigView {
   memoryEnabled: boolean;
   personaEnabled: boolean;
   personaId: string | null;
+  /** v1.2.0：是否记录完整原始事件（思考/工具调用/系统事件等）；false = 只记最终输入/回复 */
+  fullCapture: boolean;
   updatedAt: number;
   isDefault: boolean;
+  /** v1.1.8：开启记忆时默认补档历史的全局偏好 */
+  backfillOnEnable?: boolean;
 }
 
 /** GET /vaults 的单库条目（stats.lastUpdatedAt 可由打开的库补齐） */
@@ -123,12 +127,24 @@ export interface HttpScopeResolver {
   sessionConfig(sessionId: string | null): HttpSessionConfigView;
   setSessionConfig(
     sessionId: string,
-    patch: { memoryEnabled?: boolean; personaEnabled?: boolean; personaId?: string | null },
+    patch: {
+      memoryEnabled?: boolean;
+      personaEnabled?: boolean;
+      personaId?: string | null;
+      fullCapture?: boolean;
+    },
+    options?: { backfillHistory?: boolean },
   ): HttpSessionConfigView;
   /** "新会话默认"（面板/hero 选项读写；新会话无显式配置时生效） */
   sessionDefaults(): HttpSessionConfigView;
   setSessionDefaults(
-    patch: { memoryEnabled?: boolean; personaEnabled?: boolean; personaId?: string | null },
+    patch: {
+      memoryEnabled?: boolean;
+      personaEnabled?: boolean;
+      personaId?: string | null;
+      fullCapture?: boolean;
+      backfillOnEnable?: boolean;
+    },
   ): HttpSessionConfigView;
   persona: HttpPersonaController;
   /** v6：导入/导出（只追加，不删改历史记忆）；实现由集成层注入 */
@@ -198,6 +214,7 @@ const DEFAULT_SESSION_CONFIG: HttpSessionConfigView = {
   memoryEnabled: true,
   personaEnabled: false,
   personaId: null,
+  fullCapture: false,
   updatedAt: 0,
   isDefault: true,
 };
@@ -601,8 +618,10 @@ export class ReadOnlyMemoryApi {
       personaId: view.personaId,
       memoryEnabled: view.memoryEnabled,
       personaEnabled: view.personaEnabled,
+      fullCapture: view.fullCapture,
       updatedAt: view.updatedAt,
       isDefault: view.isDefault,
+      ...(view.backfillOnEnable !== undefined ? { backfillOnEnable: view.backfillOnEnable } : {}),
     };
   }
 
@@ -1086,18 +1105,38 @@ export class ReadOnlyMemoryApi {
 
   #sessionConfigWrite(body: Record<string, unknown>, resolver: HttpScopeResolver | undefined): HttpApiResponse {
     if (!resolver) return error(404, 'E_NOT_FOUND', '会话配置写接口未就绪');
-    const patch: { memoryEnabled?: boolean; personaEnabled?: boolean; personaId?: string | null } = {};
+    const patch: {
+      memoryEnabled?: boolean;
+      personaEnabled?: boolean;
+      personaId?: string | null;
+      fullCapture?: boolean;
+    } = {};
+    const defaultsPatch: {
+      memoryEnabled?: boolean;
+      personaEnabled?: boolean;
+      personaId?: string | null;
+      fullCapture?: boolean;
+      backfillOnEnable?: boolean;
+    } = {};
     if (body.memory !== undefined) patch.memoryEnabled = body.memory === true;
     else if (body.memoryEnabled !== undefined) patch.memoryEnabled = body.memoryEnabled === true;
     if (body.persona !== undefined) patch.personaEnabled = body.persona === true;
     else if (body.personaEnabled !== undefined) patch.personaEnabled = body.personaEnabled === true;
+    if (body.fullCapture !== undefined) patch.fullCapture = body.fullCapture === true;
+    else if (body.full !== undefined) patch.fullCapture = body.full === true;
     if (body.personaId !== undefined) {
       patch.personaId = body.personaId === null ? null : typeof body.personaId === 'string' && body.personaId.trim().length > 0 ? body.personaId.trim() : null;
     }
+    defaultsPatch.memoryEnabled = patch.memoryEnabled;
+    defaultsPatch.personaEnabled = patch.personaEnabled;
+    defaultsPatch.personaId = patch.personaId;
+    defaultsPatch.fullCapture = patch.fullCapture;
+    if (body.backfillOnEnable !== undefined) defaultsPatch.backfillOnEnable = body.backfillOnEnable === true;
     const rawSessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
     const isDefaults = body.defaults === true || rawSessionId.length === 0;
     if (isDefaults) {
-      const view = Object.keys(patch).length > 0 ? resolver.setSessionDefaults(patch) : resolver.sessionDefaults();
+      const hasDefaultsPatch = Object.values(defaultsPatch).some((value) => value !== undefined);
+      const view = hasDefaultsPatch ? resolver.setSessionDefaults(defaultsPatch) : resolver.sessionDefaults();
       const routing = resolver.routingForSession(null);
       return ok({
         ...this.#sessionConfigShape(view, ''),
@@ -1107,8 +1146,17 @@ export class ReadOnlyMemoryApi {
       });
     }
     const sessionId = rawSessionId;
+    // v1.1.8：backfill=true/false 明确选择是否补档；缺省由宿主使用全局偏好。
+    const backfillHistory =
+      body.backfill === true || body.backfillHistory === true
+        ? true
+        : body.backfill === false || body.backfillHistory === false
+          ? false
+          : undefined;
     const view =
-      Object.keys(patch).length > 0 ? resolver.setSessionConfig(sessionId, patch) : resolver.sessionConfig(sessionId);
+      Object.keys(patch).length > 0
+        ? resolver.setSessionConfig(sessionId, patch, backfillHistory === undefined ? undefined : { backfillHistory })
+        : resolver.sessionConfig(sessionId);
     const routing = resolver.routingForSession(sessionId);
     return ok({
       ...this.#sessionConfigShape(view, sessionId),

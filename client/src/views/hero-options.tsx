@@ -32,11 +32,12 @@ export const HERO_OPTIONS_ID = 'life-memory-hero';
 /** hero 槽位名（DSH client-ui-conversation 声明；feature-detect 注册） */
 export const HERO_OPTIONS_SLOT = 'conversation.hero.options';
 
-/** 本地三态（乐观 UI） */
+/** 本地状态（乐观 UI） */
 interface DefaultsValues {
   memory: boolean;
   persona: boolean;
   personaId: string;
+  fullCapture: boolean;
 }
 
 function valuesFrom(data: SessionDefaults | null | undefined): DefaultsValues {
@@ -44,6 +45,7 @@ function valuesFrom(data: SessionDefaults | null | undefined): DefaultsValues {
     memory: readDefaultsMemory(data),
     persona: readDefaultsPersona(data),
     personaId: typeof data?.personaId === 'string' ? data.personaId : '',
+    fullCapture: data?.fullCapture === true,
   };
 }
 
@@ -150,6 +152,7 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
   const [memory, setMemory] = useState(true);
   const [personaEnabled, setPersonaEnabled] = useState(false);
   const [personaId, setPersonaId] = useState('');
+  const [fullCapture, setFullCapture] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [failure, setFailure] = useState<'failed' | 'host-pending' | null>(null);
@@ -157,7 +160,7 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
   const mounted = useRef(true);
   const timer = useRef<number | null>(null);
   const seq = useRef(0);
-  const values = useRef<DefaultsValues>({ memory: true, persona: false, personaId: '' });
+  const values = useRef<DefaultsValues>({ memory: true, persona: false, personaId: '', fullCapture: false });
   const synced = useRef<SessionDefaults | null>(null);
 
   useEffect(() => {
@@ -185,6 +188,7 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
     setMemory(next.memory);
     setPersonaEnabled(next.persona);
     setPersonaId(next.personaId);
+    setFullCapture(next.fullCapture);
   }, [defaults.data]);
 
   const persist = async (next: DefaultsValues): Promise<void> => {
@@ -196,6 +200,7 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
         memory: next.persona ? true : next.memory,
         persona: next.persona,
         personaId: next.persona ? next.personaId || null : null,
+        fullCapture: next.fullCapture,
       });
       if (!mounted.current || ticket !== seq.current) return;
       const authoritative = valuesFrom(updated);
@@ -203,6 +208,7 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
       setMemory(authoritative.memory);
       setPersonaEnabled(authoritative.persona);
       setPersonaId(authoritative.personaId);
+      setFullCapture(authoritative.fullCapture);
       setSaving(false);
       setSavedAt(Date.now());
       props.onSaved?.(updated);
@@ -252,6 +258,11 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
     schedule({ ...values.current, personaId: next });
   };
 
+  const changeFullCapture = (next: boolean): void => {
+    setFullCapture(next);
+    schedule({ ...values.current, fullCapture: next });
+  };
+
   const definitions = personas.data?.definitions ?? [];
   const validPersonas = definitions.filter((definition) => definition.valid !== false);
   const activeId = personas.data?.activeId ?? null;
@@ -290,6 +301,13 @@ export function NewSessionDefaults(props: NewSessionDefaultsProps = {}): JSX.Ele
         label="人格"
         title={`新会话默认：${personaEnabled ? '使用' : '不使用'}人格（关闭时使用共享库）`}
         onChange={changePersona}
+      />
+      <MiniSwitch
+        checked={fullCapture}
+        disabled={saving}
+        label="全量原始"
+        title="新会话默认：是否记录思考/工具调用/系统事件等完整原始事件；关闭时只记录最终用户输入与最终助手回复（推荐）"
+        onChange={changeFullCapture}
       />
       <select
         style={{ ...styles.select, maxWidth: variant === 'compact' ? 150 : 220, padding: '3px 6px', fontSize: 12 }}

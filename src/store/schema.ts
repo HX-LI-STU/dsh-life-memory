@@ -9,7 +9,7 @@
  *     （记忆分层模型 short/mid/long retention 的治理列/索引/视图）。
  *
  * 迁移规则（docs/20 §7.7）：迁移只增不改；已发布 migration 的 SQL 永不编辑，
- * checksum 写入 schema_migrations 用于检测手改。`tests/core/store.test.ts` 对账：
+ * checksum 写入 schema_migrations 用于检测手改；对账：
  *   - `sha256(SCHEMA_V1_SQL) === SCHEMA_V1_SHA256` 且 docs/21 包含该 SQL；
  *   - `sha256(MIGRATION_2_SQL) === MIGRATION_2_SHA256` 且 docs/23-memory-models §5 的关键 DDL 片段存在。
  * 变更流程：改 docs → 新增 migration N（追加到 MIGRATIONS）→ 重新生成本文件。

@@ -2,7 +2,7 @@
 
 本目录实现 `contracts.ts` 的 `MemoryStore`。数据库文件：`<config.dataDir>/vault.db`。
 DDL 权威来源：`docs/21-schema.sql`（`src/store/schema.ts` 由脚本逐字节嵌入为 migration 1，
-`tests/core/store.test.ts` 用 sha256 对账，禁止手改 schema.ts）。
+schema.ts 的 sha256 校验值用于检测手改，禁止手改）。
 
 ## 公共入口
 

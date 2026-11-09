@@ -38,6 +38,8 @@ export interface CaptureRouteLike {
   enabled: boolean;
   vaultId: string;
   personaId: string | null;
+  /** v1.2.0：true = 全量原始事件；false/缺省 = 精简（只记最终输入/回复） */
+  fullCapture?: boolean;
   queue: Promise<CaptureSink | null>;
 }
 
@@ -71,8 +73,8 @@ function toSessionLike(session: DshSessionObjectLike): DshSessionLike {
 }
 
 /** 构造映射选项 */
-export function mapOptionsOf(config: MemoryVaultConfig, timezone: string): MapOptions {
-  return { timezone, capture: config.capture };
+export function mapOptionsOf(config: MemoryVaultConfig, timezone: string, fullCapture = true): MapOptions {
+  return { timezone, capture: config.capture, fullCapture };
 }
 
 /** 注册捕获钩子，返回聚合 disposer */
@@ -85,7 +87,9 @@ export function registerCaptureHooks(target: SessionEventTargetLike, deps: Captu
   /** 同步解析一个会话的目标库路由（v5）或回退单库（v4/测试） */
   const routeOf = (sessionId: string): CaptureRouteLike | null => {
     if (!deps.getVaultForSession) {
-      return deps.queue ? { enabled: true, vaultId: 'shared', personaId: null, queue: Promise.resolve(deps.queue) } : null;
+      return deps.queue
+        ? { enabled: true, vaultId: 'shared', personaId: null, fullCapture: false, queue: Promise.resolve(deps.queue) }
+        : null;
     }
     try {
       return deps.getVaultForSession(sessionId);
@@ -134,7 +138,8 @@ export function registerCaptureHooks(target: SessionEventTargetLike, deps: Captu
       } catch (error) {
         logger.warn(`snapshotEvents failed for session ${sessionId}`, error);
       }
-      const eventInputs = mapSessionEvents(sessionLike, events, { ...mapOptions, personaId });
+      const fullCapture = route.fullCapture === true;
+      const eventInputs = mapSessionEvents(sessionLike, events, { ...mapOptions, fullCapture, personaId });
       const inputs = [headerInput, ...eventInputs];
       const queue = await route.queue;
       if (!queue) {
@@ -164,7 +169,11 @@ export function registerCaptureHooks(target: SessionEventTargetLike, deps: Captu
       const route = routeOf(sessionLike.id);
       if (!route || route.enabled === false) return;
       const personaId = route.personaId ?? deps.getPersonaId?.() ?? null;
-      const input = mapSessionEvent(sessionLike, event, { ...mapOptions, personaId });
+      const input = mapSessionEvent(sessionLike, event, {
+        ...mapOptions,
+        fullCapture: route.fullCapture === true,
+        personaId,
+      });
       if (!input) return;
       void route.queue
         .then((queue) => queue?.ingest([input], { reason: 'capture' }))

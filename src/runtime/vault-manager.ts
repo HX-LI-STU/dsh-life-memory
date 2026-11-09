@@ -57,6 +57,8 @@ export interface CaptureRoute {
   enabled: boolean;
   vaultId: string;
   personaId: string | null;
+  /** v1.2.0：是否全量记录原始事件（false = 只记录最终输入/回复） */
+  fullCapture: boolean;
   queue: Promise<CaptureSink | null>;
 }
 
@@ -307,8 +309,9 @@ export function createRuntimeVaultManager(options: RuntimeVaultManagerOptions): 
 
   const captureRoute: RuntimeVaultManager['captureRoute'] = (sessionId) => {
     const routing = resolveRouting(sessionId);
+    const fullCapture = routing.sessionConfig.fullCapture === true;
     if (!routing.enabled) {
-      return { enabled: false, vaultId: routing.vaultId, personaId: routing.personaId, queue: Promise.resolve(null) };
+      return { enabled: false, vaultId: routing.vaultId, personaId: routing.personaId, fullCapture, queue: Promise.resolve(null) };
     }
     const queue = openVault(routing.vaultId)
       .then((bundle) => bundle.queue as CaptureSink)
@@ -316,7 +319,7 @@ export function createRuntimeVaultManager(options: RuntimeVaultManagerOptions): 
         logger.warn(`capture route open failed (vault=${routing.vaultId})`, error);
         return null;
       });
-    return { enabled: true, vaultId: routing.vaultId, personaId: routing.personaId, queue };
+    return { enabled: true, vaultId: routing.vaultId, personaId: routing.personaId, fullCapture, queue };
   };
 
   return {

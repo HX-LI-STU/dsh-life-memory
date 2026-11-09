@@ -469,10 +469,14 @@ export interface SessionConfig {
   persona?: boolean;
   /** 指定人格（可选；空 = 当前激活人格） */
   personaId?: string | null;
+  /** v1.2.0：是否记录完整原始事件（默认 false = 只记最终输入/回复） */
+  fullCapture?: boolean;
   vault?: VaultRef;
   updatedAt?: number;
   /** GET 缺省时标记（未保存过配置） */
   isDefault?: boolean;
+  /** v1.1.8：开启记忆时默认是否补档本会话历史（全局偏好） */
+  backfillOnEnable?: boolean;
 }
 
 /** POST /session-config 的 body */
@@ -481,6 +485,10 @@ export interface SessionConfigInput {
   memory?: boolean;
   persona?: boolean;
   personaId?: string | null;
+  /** v1.1.8：开启记忆时是否补档本会话已有历史；缺省跟随全局偏好 */
+  backfill?: boolean;
+  /** v1.2.0：是否记录完整原始事件（缺省走全局/会话默认） */
+  fullCapture?: boolean;
 }
 
 /**
@@ -505,6 +513,10 @@ export interface SessionDefaults {
   memoryEnabled?: boolean;
   personaEnabled?: boolean;
   updatedAt?: number;
+  /** v1.1.8：开启记忆时默认是否补档本会话历史 */
+  backfillOnEnable?: boolean;
+  /** v1.2.0：新会话默认是否记录完整原始事件 */
+  fullCapture?: boolean;
 }
 
 /** POST /session-config 保存"新会话默认"的 body（不带 sessionId，带 defaults:true） */
@@ -513,6 +525,10 @@ export interface SessionDefaultsInput {
   memory?: boolean;
   persona?: boolean;
   personaId?: string | null;
+  /** v1.1.8：开启记忆时默认是否补档历史 */
+  backfillOnEnable?: boolean;
+  /** v1.2.0：新会话默认是否记录完整原始事件 */
+  fullCapture?: boolean;
 }
 
 export interface HealthData {

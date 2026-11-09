@@ -107,11 +107,12 @@ export function roleOfEvent(event: DshSessionEventLike): string | null {
  */
 export function contentToText(
   blocks: readonly DshContentBlockLike[] | null | undefined,
-  options: { includeReasoning?: boolean } = {},
+  options: { includeReasoning?: boolean; textOnly?: boolean } = {},
 ): string | null {
   if (!blocks || blocks.length === 0) return null;
   const parts: string[] = [];
   for (const block of blocks) {
+    if (options.textOnly === true && block.type !== 'text') continue;
     switch (block.type) {
       case 'text':
         if (typeof block.text === 'string' && block.text.length > 0) parts.push(block.text);
@@ -149,9 +150,42 @@ export function contentToText(
 }
 
 /** 从消息取文本 */
-function messageText(message: DshMessageLike | null, options?: { includeReasoning?: boolean }): string | null {
+function messageText(
+  message: DshMessageLike | null,
+  options?: { includeReasoning?: boolean; textOnly?: boolean },
+): string | null {
   if (!message) return null;
   return contentToText(message.content, options);
+}
+
+/** v1.2.0：一条事件对应的消息对象 */
+function messageOfEvent(event: DshSessionEventLike): DshMessageLike | null {
+  const data = event.data ?? {};
+  if (event.type === 'assistant/message') return asMessage(data.message);
+  if (event.type === 'user/message') return asMessage(data);
+  if (event.type === 'tool/result' || event.type === 'system/message' || event.type === 'developer/message') {
+    return asMessage(data.message);
+  }
+  return null;
+}
+
+/** v1.2.0：是否含可见 text 块 */
+function hasTextBlock(event: DshSessionEventLike): boolean {
+  const message = messageOfEvent(event);
+  return Boolean(message?.content?.some((block) => block.type === 'text' && typeof block.text === 'string' && block.text.length > 0));
+}
+
+/** v1.2.0：是否含工具调用块（精简模式跳过工具步骤） */
+function hasToolCallBlock(event: DshSessionEventLike): boolean {
+  const message = messageOfEvent(event);
+  return Boolean(message?.content?.some((block) => block.type === 'tool-call'));
+}
+
+/** v1.2.0：注入型 user 消息（runtime context / skill / AGENTS.md 等） */
+function isInjectedUserMessage(event: DshSessionEventLike): boolean {
+  if (event.type !== 'user/message') return false;
+  const source = messageOfEvent(event)?.source;
+  return Boolean(source && typeof source.kind === 'string' && source.kind !== 'user');
 }
 
 /** 归一化文本（用于 ingestKey 的回退哈希，与 docs/20 §6.4 对齐） */
@@ -188,6 +222,8 @@ export function ingestKeyOf(
 export interface MapOptions {
   timezone: string;
   capture: CaptureConfig;
+  /** v1.2.0：false = 精简模式（只记录最终用户输入/最终助手回复）；缺省 true = 全量 */
+  fullCapture?: boolean;
   /** 是否把 assistant 的 reasoning 计入 text（默认 false；payload 始终保留） */
   includeReasoningInText?: boolean;
   /**
@@ -198,9 +234,27 @@ export interface MapOptions {
   personaId?: string | null;
 }
 
-/** 判断该事件是否按配置需要收录 */
-export function shouldCapture(event: DshSessionEventLike, capture: CaptureConfig): boolean {
+/** 判断该事件是否按配置需要收录（fullCapture 缺省 true；精简模式只保留最终输入/输出） */
+export function shouldCapture(
+  event: DshSessionEventLike,
+  capture: CaptureConfig,
+  fullCapture = true,
+): boolean {
   const type = event.type;
+  if (!fullCapture) {
+    if (type === 'user/message') {
+      if (!capture.userMessages) return false;
+      if (isInjectedUserMessage(event)) return false;
+      return hasTextBlock(event);
+    }
+    if (type === 'assistant/message') {
+      if (!capture.assistantMessages) return false;
+      if (hasToolCallBlock(event)) return false;
+      return hasTextBlock(event);
+    }
+    // 思考、工具、系统、turn/step、事件等一律不收录
+    return false;
+  }
   if (type === 'user/message') {
     if (!capture.userMessages) return false;
     // 注入型 user 消息（agent.inject / skill / AGENTS.md 等）也属于原始记忆，照常保留
@@ -212,6 +266,21 @@ export function shouldCapture(event: DshSessionEventLike, capture: CaptureConfig
   return true;
 }
 
+/** v1.2.0：精简模式 payload（只保留 text 块，去掉 reasoning/tool-call 等） */
+function compactPayloadOf(event: DshSessionEventLike, kind: RawKind): unknown {
+  const message = messageOfEvent(event);
+  const blocks = Array.isArray(message?.content)
+    ? message.content.filter((block) => block.type === 'text')
+    : [];
+  const role = kind === 'assistant' ? 'assistant' : 'user';
+  return {
+    type: event.type,
+    seq: event.seq,
+    time: event.time,
+    data: { message: { role, content: blocks } },
+  };
+}
+
 /**
  * 核心映射：一个 DSH 会话事件 → 一条 RawRecordInput。
  * @returns null 表示按配置跳过（不会发生"原始数据丢失"以外的语义变化）
@@ -221,13 +290,14 @@ export function mapSessionEvent(
   event: DshSessionEventLike,
   options: MapOptions,
 ): RawRecordInput | null {
-  if (!shouldCapture(event, options.capture)) return null;
+  if (!shouldCapture(event, options.capture, options.fullCapture !== false)) return null;
   const kind = kindOfEvent(event);
   const role = roleOfEvent(event);
   const data = event.data ?? {};
   const turn = asNumber(data.turn);
   const step = asNumber(data.step);
   const workspace = typeof session.header?.cwd === 'string' ? session.header.cwd : null;
+  const compact = options.fullCapture === false;
 
   let text: string | null = null;
   const tags: string[] = [];
@@ -235,7 +305,7 @@ export function mapSessionEvent(
   switch (event.type) {
     case 'user/message': {
       const message = asMessage(data);
-      text = messageText(message, { includeReasoning: false });
+      text = messageText(message, { includeReasoning: false, textOnly: compact });
       const source = message?.source;
       if (source && source.kind && source.kind !== 'user') {
         tags.push('injected');
@@ -245,7 +315,10 @@ export function mapSessionEvent(
     }
     case 'assistant/message': {
       const message = asMessage(data.message);
-      text = messageText(message, { includeReasoning: options.includeReasoningInText === true });
+      text = messageText(message, {
+        includeReasoning: options.includeReasoningInText === true && !compact,
+        textOnly: compact,
+      });
       if (data.interrupted === true) tags.push('interrupted');
       const usage = data.usage;
       if (usage && typeof usage === 'object') tags.push('has-usage');
@@ -313,8 +386,8 @@ export function mapSessionEvent(
     text,
     // 人格归属（索引元数据；null = 共享）
     personaId: options.personaId ?? null,
-    // 完整事件信封：无损保存（含 data/surfaceOp/sourceEventSeqs/ignorable）
-    payload: event,
+    // 全量模式无损保存完整事件；精简模式只保留 text 块（不含思考/工具调用/系统事件）
+    payload: compact ? compactPayloadOf(event, kind) : event,
     tags: tags.length > 0 ? tags : undefined,
     ingestKey,
     meta: {

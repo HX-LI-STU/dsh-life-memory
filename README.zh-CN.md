@@ -10,7 +10,7 @@
 
 [English](README.md)
 
-**首次公开发布 — v1.1.5。**
+**版本：v1.2.0**
 
 DSH 的会话是短命的：关掉窗口，上下文就没了。`dsh-life-memory` 为 Agent 提供跨会话、跨重启的长期（理论上可终身）记忆，并把"真正发生过什么"（不可变原始记录）与"模型当前想起来什么"（可重建、可遗忘的派生记忆）严格分开。
 
@@ -21,6 +21,7 @@ DSH 的会话是短命的：关掉窗口，上下文就没了。`dsh-life-memory
 - **长期保存**：记忆随对话增长，实际上限只取决于磁盘空间；原始会话不会被记忆系统自动删除。
 - **可共享**：使用共享库的会话之间共享记忆；同一人格的所有会话共享该人格库；不同人格之间相互隔离。
 - **低上下文成本**：每次提示只注入精简画像与当前会话工作记忆，细节按需从原始/向量库取回，而不是塞进每一轮上下文。
+- **开启记忆不丢历史**：开启记忆/人格时会弹窗询问是否补档本会话已有历史（包括你之前发送的消息），每次开启在弹窗中选择。关闭记忆只停止后续捕获，已归档 L0 记录不会被删除。
 
 ---
 
@@ -40,6 +41,7 @@ DSH 的会话是短命的：关掉窗口，上下文就没了。`dsh-life-memory
 
 ### 记忆架构
 
+- **默认精简记录**：只归档你发送的最终输入与助手最终回复；思考、工具调用/结果、系统事件默认不记录。需要全量时，打开「记录完整原始事件」开关（会话面板与新会话页都有）。
 - **不可变原始档案（L0）**
   - 追加式 JSONL 段文件 + 全局 SHA-256 哈希链 + manifest。
   - 原始段文件**按会话物理分开**（`segments/<日期>/<sessionKey>/`），不同会话不会混写。
@@ -139,27 +141,32 @@ DSH 会话事件 ──► 捕获队列 ──► L0 原始档案（追加、哈
 
 ### 从发布包安装
 
+仓库根目录已包含可直接安装的压缩包：`dsh-life-memory-1.2.0.tgz`（也可从 GitHub Releases 下载）。
+
+> **安装前：先完全退出 DSH Desktop。** 如果是全新 DSH，请先启动一次 DSH Desktop 初始化 `desktop` profile，再退出（CLI 会初始化/使用 profile，但安装时不要让运行中的应用占用 profile）。
+
 ```bash
-dsh plugin --profile desktop add "./dsh-life-memory-1.1.5.tgz"   # 桌面版 profile
-# 或：dsh plugin --profile web add "./dsh-life-memory-1.1.5.tgz"
+dsh plugin --profile desktop add "./dsh-life-memory-1.2.0.tgz"   # 桌面版 profile
+# 或：dsh plugin --profile web add "./dsh-life-memory-1.2.0.tgz"
 ```
 
-若 `dsh` 不在 `PATH`，使用 DSH 自带 CLI（Windows：`resources/runtime/cli/bin/dsh.cmd`）。安装后**完全退出并重启 DSH Desktop**——插件在启动时加载，侧栏会出现「记忆库」。
+若 `dsh` 不在 `PATH`，使用 DSH 自带 CLI（Windows：`resources/runtime/cli/bin/dsh.cmd`）。安装后重新启动 DSH Desktop——插件在启动时加载，侧栏会出现「记忆库」。
 
 ### 从源码构建
 
 ```bash
 npm install
-npm run build        # 生成 lib/index.js（宿主）与 lib/client.js（Web 面板）
-npm pack             # 生成 dsh-life-memory-1.1.5.tgz
-dsh plugin --profile desktop add ./dsh-life-memory-1.1.5.tgz
+npm run build           # 生成 lib/index.js（宿主）与 lib/client.js（Web 面板）
+npm run pack:release    # 生成 dsh-life-memory-1.2.0.tgz（包内 README 为简明使用指南）
+dsh plugin --profile desktop add ./dsh-life-memory-1.2.0.tgz
 ```
+
+包内 README 是简明的安装/使用指南（`docs/PACKAGE_README.zh-CN.md`）；仓库 README 继续保留完整项目文档。
 
 ### 开发
 
 ```bash
 npm run typecheck    # TypeScript 类型检查
-npm test             # 单元测试（tests/run.mjs）
 npm run build        # 宿主 + 客户端构建
 ```
 
@@ -171,7 +178,7 @@ npm run build        # 宿主 + 客户端构建
 2. 正常聊天——会话事件会被自动捕获，派生记忆在后台生成。
 3. 明确让 Agent 记住：
 
-   > “记住：这个项目使用 TypeScript ESM，测试用 `node tests/run.mjs`。”
+   > “记住：这个项目使用 TypeScript ESM，构建用 `npm run build`。”
 
    这会调用 `memory_save`，保存为显式 L3 记忆。
 4. 使用 `memory_recall`（或直接问“之前我们约定过什么？”）——显式检索会查 L0 与永久向量索引。
@@ -205,6 +212,7 @@ npm run build        # 宿主 + 客户端构建
 ```
 
 - `memory_recall` 显式模式检索**不可变 L0 原始档案 + 原始层向量索引**并返回引用；隐式模式检索派生层。
+- 人格会话仍可按需读取共享库：给 `memory_recall` / `memory_get_raw` 传 `vault: "shared"`（其它人格库依旧不可访问）；面板的 `?vault=shared` 查询同样可用于只读查看。
 - `memory_get_raw` 返回完整原始记录并校验哈希。
 - 结果带有会话与人格元数据，模型能知道某条记忆属于哪个会话。
 - 原始数据永不删除，因此只要档案还在，旧会话随时可以这样恢复（实际限制只有磁盘空间）。
@@ -361,7 +369,7 @@ aliases: [xiaoli]
 欢迎提交 Issue 和 Pull Request。
 
 - 必须保持不变量：L0 只追加且哈希链完整；派生数据可重建；导入不破坏已有数据。
-- 提交 PR 前请运行 `npm run typecheck`、`npm test`、`npm run build`。
+- 提交 PR 前请运行 `npm run typecheck`、`npm run build`。
 - 人格定义与文档都是 markdown，便于审查。
 
 ---

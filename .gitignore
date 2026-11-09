@@ -4,6 +4,7 @@ lib/
 dist/
 build/
 *.tgz
+!dsh-life-memory-*.tgz
 package-lock.json.bak
 
 # local data & logs

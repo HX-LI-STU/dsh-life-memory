@@ -55,6 +55,10 @@ export const MEMORY_RECALL_DEF: ToolDefinition = {
         description: '要检索的问题或关键词；中英文均可，中文 2 字词可命中',
       },
       limit: { type: 'integer', minimum: 1, maximum: 50, default: 8 },
+      vault: {
+        type: 'string',
+        description: '只读访问共享库时填 "shared"：人格开启的会话仍可读取共享记忆；其它人格库不可访问',
+      },
       mode: {
         type: 'string',
         enum: ['explicit', 'implicit'],
@@ -148,7 +152,10 @@ export const MEMORY_GET_RAW_DEF: ToolDefinition = {
     '按原始记录 id（YYYY-MM-DD-NNNNNN）读取不可变原始记录全文（含 payload），并校验哈希/位置。用于引用原文。原始记录可能包含隐私/密钥，请勿外传。',
   inputSchema: {
     type: 'object',
-    properties: { id: { type: 'string', pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6,}$' } },
+    properties: {
+      id: { type: 'string', pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6,}$' },
+      vault: { type: 'string', description: '只读读取共享库原始记录时填 "shared"' },
+    },
     required: ['id'],
   },
 };
@@ -258,6 +265,16 @@ export const MEMORY_SESSION_CONFIG_DEF: ToolDefinition = {
       memory: { type: 'boolean', description: '是否启用记忆（默认 true）' },
       persona: { type: 'boolean', description: '是否启用人格库（默认 false = 共享库）' },
       personaId: { oneOf: [{ type: 'string' }, { type: 'null' }], description: '指定人格 id；null = 使用全局激活人格' },
+      fullCapture: {
+        type: 'boolean',
+        description:
+          '是否记录完整原始事件（思考/工具调用/系统事件等）；默认 false = 只记录最终用户输入与最终助手回复',
+      },
+      backfill: {
+        type: 'boolean',
+        description:
+          '开启记忆时是否补档本会话已有历史（用户消息/回复等）；缺省跟随面板全局偏好（默认 false），只在本会话从关闭切到开启时生效',
+      },
     },
   },
 };

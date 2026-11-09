@@ -16,7 +16,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, isHostWritePending, useApi } from '../api.ts';
 import { Badge, CopyButton, EmptyState, ErrorNotice, LoadingNotice, SectionTitle } from '../components.tsx';
 import { styles, token } from '../theme.tsx';
-import type { SessionConfig } from '../types.ts';
+import type { SessionConfig, SessionDefaults } from '../types.ts';
 
 export interface SessionMemoryPanelProps {
   /** session 作用域标准席位；缺失时说明需在会话内使用 */
@@ -74,6 +74,8 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
   );
   const personas = useApi(() => api.personas(), []);
   const vaults = useApi(() => api.vaults(), []);
+  // 仅用于探测 Host 是否已加载 v1.1.8 的补档协议（旧 Host 无该字段）
+  const defaults = useApi<SessionDefaults>(() => api.sessionDefaults(), []);
 
   const [memory, setMemory] = useState<boolean>(true);
   const [personaEnabled, setPersonaEnabled] = useState<boolean>(false);
@@ -82,6 +84,11 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hostPending, setHostPending] = useState<boolean>(false);
+  // v1.1.8：开启记忆/人格时弹窗确认是否补档历史（默认每次询问，不设持久开关）
+  const [pendingEnable, setPendingEnable] = useState<{ persona: boolean } | null>(null);
+  const [backfillChoice, setBackfillChoice] = useState<boolean>(false);
+  // v1.2.0：默认只记最终输入/回复；打开才记录思考/工具/事件
+  const [fullCapture, setFullCapture] = useState<boolean>(false);
 
   // 载入/刷新配置时同步本地开关
   useEffect(() => {
@@ -90,20 +97,33 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
     setMemory(data.memory !== false);
     setPersonaEnabled(data.persona === true);
     setPersonaId(data.personaId ?? '');
+    setFullCapture(data.fullCapture === true);
   }, [config.data]);
+
+  // 旧 Host 未加载 v1.1.8 协议时，弹窗里的补档选择无法生效
+  const hostSupportsBackfill = defaults.data ? defaults.data.backfillOnEnable !== undefined : true;
 
   const definitions = personas.data?.definitions ?? [];
   const validPersonas = definitions.filter((definition) => definition.valid !== false);
+  const globalActivePersona = definitions.find((definition) => definition.id === (personas.data?.activeId ?? '')) ?? null;
+  // 实际生效的库由「本会话使用人格」开关决定：关闭时必然是共享库（全局激活人格不改变本会话路由）
   const activeVault = useMemo(() => {
+    if (!personaEnabled) return { id: 'shared', name: '共享记忆库' };
     const ref = config.data?.vault;
     if (ref?.name || ref?.id) return { id: ref.id, name: ref.name ?? ref.id };
     const list = vaults.data?.vaults ?? [];
     const activeId = vaults.data?.activeVaultId;
     const found = list.find((vault) => vault.id === activeId);
     return found ? { id: found.id, name: found.name ?? found.id } : { id: activeId ?? '', name: activeId ?? '' };
-  }, [config.data?.vault, vaults.data]);
+  }, [config.data?.vault, vaults.data, personaEnabled]);
 
-  const save = async (patch: { memory?: boolean; persona?: boolean; personaId?: string | null }): Promise<void> => {
+  const save = async (patch: {
+    memory?: boolean;
+    persona?: boolean;
+    personaId?: string | null;
+    backfill?: boolean;
+    fullCapture?: boolean;
+  }): Promise<void> => {
     if (!sessionId) return;
     setSaving(true);
     setError(null);
@@ -115,11 +135,14 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
         memory: nextPersona ? true : (patch.memory ?? memory),
         persona: nextPersona,
         personaId: patch.personaId !== undefined ? patch.personaId : personaId || null,
+        fullCapture: patch.fullCapture ?? fullCapture,
+        ...(patch.backfill !== undefined ? { backfill: patch.backfill } : {}),
       });
       // 用服务端返回值回填（Host 是权威）
       setMemory(updated.memory !== false);
       setPersonaEnabled(updated.persona === true);
       setPersonaId(updated.personaId ?? '');
+      setFullCapture(updated.fullCapture === true);
       setSavedAt(Date.now());
       setHostPending(false);
     } catch (caught) {
@@ -131,6 +154,22 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  // v1.1.8：确认开启（带补档选择；默认每次弹窗重新选择）
+  const confirmEnable = async (): Promise<void> => {
+    const target = pendingEnable;
+    if (!target) return;
+    setPendingEnable(null);
+    const backfill = backfillChoice && hostSupportsBackfill;
+    if (target.persona) {
+      setMemory(true);
+      setPersonaEnabled(true);
+      await save({ persona: true, memory: true, personaId: personaId || null, backfill });
+    } else {
+      setMemory(true);
+      await save({ memory: true, backfill });
     }
   };
 
@@ -150,7 +189,8 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
     <div style={{ padding: '14px 20px', height: '100%', overflow: 'auto', boxSizing: 'border-box' }}>
       <div style={{ ...styles.row, gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
         <Badge tone="brand">记忆库 · 本会话</Badge>
-        <span style={{ ...styles.mono, color: token.textTertiary }}>session {sessionId}</span>`n        <CopyButton text={sessionId} label="复制" title="复制完整 sessionId（用于单会话导出/导入）" />
+        <span style={{ ...styles.mono, color: token.textTertiary }}>session {sessionId}</span>
+        <CopyButton text={sessionId} label="复制" title="复制完整 sessionId（用于单会话导出/导入）" />
         <button type="button" style={{ ...styles.button, marginLeft: 'auto' }} onClick={() => config.reload()} disabled={saving}>
           刷新
         </button>
@@ -162,6 +202,12 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
         <div style={{ ...styles.error, marginBottom: 10 }} role="alert">
           {error}
           {hostPending ? '（可先保持只读；联调后重试）' : ''}
+        </div>
+      ) : null}
+      {defaults.data && !hostSupportsBackfill ? (
+        <div style={{ ...styles.error, marginBottom: 10 }} role="alert">
+          当前运行中的 DSH Host 仍是旧版本（尚未加载补档协议）：弹窗里的“补档本会话全部历史”不会生效。
+          请完全退出并重新启动 DSH Desktop 后再试。
         </div>
       ) : null}
       {savedAt ? <div style={{ ...styles.statHint, color: token.success, marginBottom: 8 }}>✓ 已保存（{new Date(savedAt).toLocaleTimeString()}）</div> : null}
@@ -180,6 +226,11 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
               : '关闭后本会话不再捕获/召回记忆（仍可只读浏览档案）。'
           }
           onChange={(next) => {
+            if (next && !memory) {
+              setBackfillChoice(false);
+              setPendingEnable({ persona: false });
+              return;
+            }
             setMemory(next);
             void save({ memory: next });
           }}
@@ -190,9 +241,23 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
           label="本会话使用人格"
           hint="开启后按人格隔离记忆与注入身份块（记忆同时强制开启）；关闭则使用共享记忆库。"
           onChange={(next) => {
-            if (next) setMemory(true);
+            if (next && !personaEnabled) {
+              setBackfillChoice(false);
+              setPendingEnable({ persona: true });
+              return;
+            }
             setPersonaEnabled(next);
             void save({ persona: next, memory: next ? true : memory, personaId: next ? personaId || null : null });
+          }}
+        />
+        <Toggle
+          checked={fullCapture}
+          disabled={saving || config.phase === 'loading'}
+          label="记录完整原始事件"
+          hint="关闭（默认）：只记录你发送的最终输入与助手最终回复；开启：同时记录思考、工具调用、系统事件等（记录量会明显增加）。"
+          onChange={(next) => {
+            setFullCapture(next);
+            void save({ fullCapture: next });
           }}
         />
         <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -220,15 +285,76 @@ export function SessionMemoryPanel(props: SessionMemoryPanelProps): JSX.Element 
           当前使用的记忆库：<strong>{activeVault.name || activeVault.id || '（未知）'}</strong>
           {activeVault.id ? `（${activeVault.id}）` : ''}
         </div>
+        {!personaEnabled && globalActivePersona ? (
+          <div style={{ ...styles.statHint, marginTop: 4 }}>
+            全局激活人格：<strong>{globalActivePersona.name || globalActivePersona.id}</strong>（开启「本会话使用人格」后，本会话才会使用其独立记忆库；关闭时使用共享库）
+          </div>
+        ) : null}
         {config.data?.isDefault ? (
-          <div style={{ ...styles.statHint, marginTop: 4 }}>本会话尚未保存过配置，当前显示默认值（memory=true / persona=false）。</div>
+          <div style={{ ...styles.statHint, marginTop: 4 }}>本会话尚未保存过配置，当前显示默认值（memory=${config.data?.memory === true ? 'true' : 'false'} / persona=${config.data?.persona === true ? 'true' : 'false'}）。</div>
         ) : null}
       </div>
 
       <div style={{ ...styles.statHint, marginTop: 12, lineHeight: 1.7 }}>
-        会话级开关只影响本会话：关闭记忆后不捕获/召回，但不会影响已归档的 L0/三层记忆；人格开关决定使用共享库还是独立人格库。
+        会话级开关只影响本会话：关闭记忆后不再捕获新记录、注入或召回；关闭前已写入的 L0 原始记录会保留（不可变归档，不会自动删除）。人格开关决定使用共享库还是独立人格库；
+        开启记忆时会在弹窗中选择是否补档本会话已有历史（默认不补档，每次重新选择）。
         全局人格切换请到「人格」页签（切换即切换记忆库）。
       </div>
+
+      {pendingEnable ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 2000,
+            background: 'rgba(0,0,0,0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+        >
+          <div style={{ ...styles.card, width: 'min(540px, 94vw)', maxHeight: '86vh', overflow: 'auto' }}>
+            <SectionTitle first>{pendingEnable.persona ? '开启人格与记忆' : '开启本会话记忆'}</SectionTitle>
+            <div style={{ ...styles.statHint, lineHeight: 1.7 }}>
+              开启后本会话会捕获新事件并参与提示词注入。是否同时补档本会话已经发生的全部历史
+              （包括你之前发送的消息、回复与工具调用）？
+            </div>
+            {pendingEnable.persona ? (
+              <div style={{ ...styles.statHint, color: token.warn, marginTop: 8, lineHeight: 1.7 }}>
+                注意：开启人格后补档会把同一段历史写入人格库，可能与共享库中已有记录重复；不需要时请保持补档关闭。
+              </div>
+            ) : null}
+            <div style={{ marginTop: 12 }}>
+              <Toggle
+                checked={backfillChoice && hostSupportsBackfill}
+                disabled={!hostSupportsBackfill || saving}
+                onChange={(next) => {
+                  if (hostSupportsBackfill) setBackfillChoice(next);
+                }}
+                label="补档本会话全部历史"
+                hint={
+                  !hostSupportsBackfill
+                    ? '当前 Host 未加载补档协议，此开关不会生效；请重启 DSH。'
+                    : backfillChoice
+                      ? '会写入开启前（甚至关闭记忆期间）的会话内容；L0 不可变，写入后不会自动删除。'
+                      : '关闭：只从此刻开始捕获，不导入历史。'
+                }
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button type="button" style={styles.button} onClick={() => setPendingEnable(null)} disabled={saving}>
+                取消
+              </button>
+              <button type="button" style={{ ...styles.button, ...styles.buttonPrimary }} onClick={() => void confirmEnable()} disabled={saving}>
+                {saving ? '保存中…' : '确认开启'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

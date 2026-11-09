@@ -10,7 +10,7 @@
 
 [中文说明](README.zh-CN.md)
 
-**Initial public release — v1.1.5.**
+**v1.2.0**
 
 DSH conversations are ephemeral: close a session and the context is gone. `dsh-life-memory` gives your agents durable, inspectable, effectively life-long memory that survives restarts, with a strict separation between **what actually happened** (immutable raw records) and **what the model recalls** (derived, forgettable memories).
 
@@ -21,6 +21,7 @@ DSH conversations are ephemeral: close a session and the context is gone. `dsh-l
 - **Long horizon** — the archive grows with your conversations and is limited only by disk space; raw conversations are never deleted by the memory system itself.
 - **Shared by design** — sessions using the shared vault share memories with each other, and all sessions of a persona share that persona's vault; separate personas stay isolated.
 - **Low context cost** — each prompt only gets a compact profile and current-session working memory; details are fetched on demand from the raw/vector store instead of being stuffed into every prompt.
+- **No lost history when enabling memory** — when memory (or a persona) is turned on, a confirmation dialog asks whether to backfill the current session's existing events (including your earlier messages). The choice is made per activation in the dialog; disabling memory only stops future capture, and already archived L0 records stay immutable.
 
 ---
 
@@ -40,6 +41,7 @@ DSH conversations are ephemeral: close a session and the context is gone. `dsh-l
 
 ### Memory architecture
 
+- **Compact by default**: only the final user input and final assistant answer are archived; reasoning, tool calls, tool results and system events are skipped. A separate "记录完整原始事件 / full raw events" switch (session panel and new-session page) turns full capture on when needed.
 - **Immutable raw archive (L0)**
   - Append-only JSONL segments with a global SHA-256 hash chain and manifest.
   - Raw segments are physically separated **per session** (`segments/<day>/<sessionKey>/`), so conversations never mix in storage.
@@ -139,27 +141,32 @@ DSH session events ──► capture queue ──► L0 raw archive (append-only
 
 ### From a release package
 
+A ready-to-install archive is included in this repository: `dsh-life-memory-1.2.0.tgz` (or download it from GitHub Releases).
+
+> **Before installing:** fully quit DSH Desktop. If this is a fresh DSH installation, start DSH Desktop once to initialize the `desktop` profile, then quit it (the CLI initializes/uses profiles, but the running app should not own the profile while installing).
+
 ```bash
-dsh plugin --profile desktop add "./dsh-life-memory-1.1.5.tgz"   # desktop app profile
-# or: dsh plugin --profile web add "./dsh-life-memory-1.1.5.tgz"
+dsh plugin --profile desktop add "./dsh-life-memory-1.2.0.tgz"   # desktop app profile
+# or: dsh plugin --profile web add "./dsh-life-memory-1.2.0.tgz"
 ```
 
-If the `dsh` CLI is not on `PATH`, use the CLI bundled with DSH (`resources/runtime/cli/bin/dsh.cmd` on Windows). After installing, **fully quit and restart DSH Desktop** — the plugin loads at startup, and the sidebar will show **Life Memory** (记忆库).
+If the `dsh` CLI is not on `PATH`, use the CLI bundled with DSH (`resources/runtime/cli/bin/dsh.cmd` on Windows). Then start DSH Desktop again — the plugin loads at startup, and the sidebar will show **Life Memory** (记忆库).
 
 ### From source
 
 ```bash
 npm install
-npm run build        # produces lib/index.js (host) and lib/client.js (web panel)
-npm pack             # produces dsh-life-memory-1.1.5.tgz
-dsh plugin --profile desktop add ./dsh-life-memory-1.1.5.tgz
+npm run build           # produces lib/index.js (host) and lib/client.js (web panel)
+npm run pack:release    # creates dsh-life-memory-1.2.0.tgz with the concise package usage README
+dsh plugin --profile desktop add ./dsh-life-memory-1.2.0.tgz
 ```
+
+The included release archive's README is a short install/usage guide (`docs/PACKAGE_README.md`); the repository README remains the full project documentation.
 
 ### Development
 
 ```bash
 npm run typecheck    # TypeScript, no emit
-npm test             # unit tests (tests/run.mjs)
 npm run build        # host + client bundles
 ```
 
@@ -173,7 +180,7 @@ npm run build        # host + client bundles
 2. Chat normally — session events are captured automatically; derived memories are built in the background.
 3. Ask the agent to remember something explicitly:
 
-   > “记住：这个项目使用 TypeScript ESM，测试用 `node tests/run.mjs`。”
+   > “记住：这个项目使用 TypeScript ESM，构建用 `npm run build`。”
 
    This calls `memory_save` and is stored as an explicit L3 memory.
 4. Use `memory_recall` (or just ask “之前我们约定过什么？”) — explicit recall searches L0 plus its permanent vector index.
@@ -207,6 +214,7 @@ Agent -> memory_recall({ query: "deployment port", mode: "explicit", limit: 8 })
 ```
 
 - `memory_recall` explicit mode searches the **immutable L0 archive + raw-vector index** and returns citations; implicit mode searches derived layers.
+- Persona sessions can still read the shared vault on demand: pass `vault: "shared"` to `memory_recall` / `memory_get_raw` (other persona vaults remain inaccessible). The panel's `?vault=shared` query provides the same read scope.
 - `memory_get_raw` returns the full original record and verifies its hash.
 - Results carry session and persona metadata, so the agent knows which conversation a memory belongs to.
 - Because raw data is never deleted, this keeps working for old sessions as long as the archive exists (disk space is the only practical limit).
@@ -379,7 +387,7 @@ Planned directions: richer consolidation, embedding-model migration tooling, bet
 Issues and pull requests are welcome.
 
 - Keep the invariants: L0 append-only and hash-chained; derived data rebuildable; imports non-destructive.
-- Run `npm run typecheck`, `npm test` and `npm run build` before opening a PR.
+- Run `npm run typecheck` and `npm run build` before opening a PR.
 - Persona definitions and docs are plain markdown — contributions are easy to review.
 
 ---

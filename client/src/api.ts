@@ -428,6 +428,8 @@ export const api = {
       memory: input.memory,
       persona: input.persona,
       personaId: input.personaId,
+      backfillOnEnable: input.backfillOnEnable,
+      fullCapture: input.fullCapture,
       defaults: true,
     }),
 

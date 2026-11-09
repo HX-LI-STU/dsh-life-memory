@@ -1,6 +1,6 @@
 {
   "name": "dsh-life-memory",
-  "version": "1.1.5",
+  "version": "1.2.0",
   "description": "Long-term, low-context memory for DeepSeek Harness (DSH): never-deleted raw conversations, vector/FTS retrieval, layered memory, shared and per-persona vaults. 长期、低上下文依赖的记忆插件：永不删除的原始会话、向量检索、分层记忆、共享与人格独立记忆库。",
   "author": "hanxustu",
   "contributors": [
@@ -34,7 +34,8 @@
     "README.md",
     "README.zh-CN.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -56,8 +57,8 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node tests/run.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pack:release": "node scripts/pack-release.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
